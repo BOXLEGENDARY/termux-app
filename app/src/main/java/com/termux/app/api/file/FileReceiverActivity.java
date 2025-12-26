@@ -26,6 +26,8 @@ import com.termux.shared.logger.Logger;
 import com.termux.shared.termux.settings.properties.TermuxAppSharedProperties;
 import com.termux.shared.termux.settings.properties.TermuxPropertyConstants;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -34,31 +36,37 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 
 public class FileReceiverActivity extends AppCompatActivity {
 
+    // Standard paths for Termux file handling.
     static final String TERMUX_RECEIVEDIR = TermuxConstants.TERMUX_FILES_DIR_PATH + "/home/downloads";
     static final String EDITOR_PROGRAM = TermuxConstants.TERMUX_HOME_DIR_PATH + "/bin/termux-file-editor";
     static final String URL_OPENER_PROGRAM = TermuxConstants.TERMUX_HOME_DIR_PATH + "/bin/termux-url-opener";
 
+    // Pre-compile the magnet link pattern to avoid repeated compilation overhead during intent checks.
+    private static final Pattern MAGNET_PATTERN = Pattern.compile("magnet:\\?xt=urn:btih:.*?");
+
     /**
-     * If the activity should be finished when the name input dialog is dismissed. This is disabled
-     * before showing an error dialog, since the act of showing the error dialog will cause the
-     * name input dialog to be implicitly dismissed, and we do not want to finish the activity directly
-     * when showing the error dialog.
+     * Controls the activity lifecycle when the dialog is dismissed. 
+     * Kept separate to prevent premature closure during error reporting.
      */
     boolean mFinishOnDismissNameDialog = true;
 
     private static final String API_TAG = TermuxConstants.TERMUX_APP_NAME + "FileReceiver";
-
     private static final String LOG_TAG = "FileReceiverActivity";
 
+    /**
+     * Validates if the text is a supported URL format or a magnet link.
+     */
     static boolean isSharedTextAnUrl(String sharedText) {
         if (sharedText == null || sharedText.isEmpty()) return false;
 
         return Patterns.WEB_URL.matcher(sharedText).matches()
-            || Pattern.matches("magnet:\\?xt=urn:btih:.*?", sharedText);
+            || MAGNET_PATTERN.matcher(sharedText).matches();
     }
 
     @Override
@@ -87,6 +95,7 @@ public class FileReceiverActivity extends AppCompatActivity {
                     String subject = IntentUtils.getStringExtraIfSet(intent, Intent.EXTRA_SUBJECT, null);
                     if (subject == null) subject = sharedTitle;
                     if (subject != null) subject += ".txt";
+                    // Convert string to stream using UTF-8 charset.
                     promptNameAndSave(new ByteArrayInputStream(sharedText.getBytes(StandardCharsets.UTF_8)), subject);
                 }
             } else {
@@ -105,7 +114,6 @@ public class FileReceiverActivity extends AppCompatActivity {
             } else if (UriScheme.SCHEME_FILE.equals(scheme)) {
                 Logger.logVerbose(LOG_TAG, "uri: \"" + dataUri + "\", path: \"" + dataUri.getPath() + "\", fragment: \"" + dataUri.getFragment() + "\"");
 
-                // Get full path including fragment (anything after last "#")
                 String path = UriUtils.getUriFilePathWithFragment(dataUri);
                 if (DataUtils.isNullOrEmpty(path)) {
                     showErrorDialogAndQuit("File path from data uri is null, empty or invalid.");
@@ -114,6 +122,7 @@ public class FileReceiverActivity extends AppCompatActivity {
 
                 File file = new File(path);
                 try {
+                    // Open a stream to the local file.
                     FileInputStream in = new FileInputStream(file);
                     promptNameAndSave(in, file.getName());
                 } catch (FileNotFoundException e) {
@@ -140,6 +149,7 @@ public class FileReceiverActivity extends AppCompatActivity {
 
             String attachmentFileName = null;
 
+            // Query the content provider to determine the display name.
             String[] projection = new String[]{OpenableColumns.DISPLAY_NAME};
             try (Cursor c = getContentResolver().query(uri, projection, null, null, null)) {
                 if (c != null && c.moveToFirst()) {
@@ -160,6 +170,7 @@ public class FileReceiverActivity extends AppCompatActivity {
     }
 
     void promptNameAndSave(final InputStream in, final String attachmentFileName) {
+        // Display a dialog to confirm or modify the filename before saving.
         TextInputDialogUtils.textInput(this, R.string.title_file_received, attachmentFileName,
             R.string.action_file_received_edit, text -> {
                 File outFile = saveStreamWithName(in, text);
@@ -172,7 +183,7 @@ public class FileReceiverActivity extends AppCompatActivity {
                     return;
                 }
 
-                // Do this for the user if necessary:
+                // Ensure the editor script is executable.
                 //noinspection ResultOfMethodCallIgnored
                 editorProgramFile.setExecutable(true);
 
@@ -213,12 +224,18 @@ public class FileReceiverActivity extends AppCompatActivity {
 
         try {
             final File outFile = new File(receiveDir, attachmentFileName);
-            try (FileOutputStream f = new FileOutputStream(outFile)) {
-                byte[] buffer = new byte[4096];
+            
+            // Use buffered streams to minimize system calls and improve I/O performance for large files.
+            // Try-with-resources ensures both streams are closed automatically.
+            try (BufferedInputStream bis = new BufferedInputStream(in);
+                 BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(outFile))) {
+                
+                byte[] buffer = new byte[8192];
                 int readBytes;
-                while ((readBytes = in.read(buffer)) > 0) {
-                    f.write(buffer, 0, readBytes);
+                while ((readBytes = bis.read(buffer)) != -1) {
+                    bos.write(buffer, 0, readBytes);
                 }
+                bos.flush();
             }
             return outFile;
         } catch (IOException e) {
@@ -236,7 +253,7 @@ public class FileReceiverActivity extends AppCompatActivity {
             return;
         }
 
-        // Do this for the user if necessary:
+        // Ensure the URL opener script is executable.
         //noinspection ResultOfMethodCallIgnored
         urlOpenerProgramFile.setExecutable(true);
 
@@ -256,32 +273,32 @@ public class FileReceiverActivity extends AppCompatActivity {
      * {@link TermuxPropertyConstants#KEY_DISABLE_FILE_VIEW_RECEIVER} value.
      */
     public static void updateFileReceiverActivityComponentsState(@NonNull Context context) {
-        new Thread() {
-            @Override
-            public void run() {
-                TermuxAppSharedProperties properties = TermuxAppSharedProperties.getProperties();
+        // Execute component updates on a background thread to avoid blocking the UI.
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        executor.execute(() -> {
+            TermuxAppSharedProperties properties = TermuxAppSharedProperties.getProperties();
 
-                String errmsg;
-                boolean state;
+            String errmsg;
+            boolean state;
 
-                state = !properties.isFileShareReceiverDisabled();
-                Logger.logVerbose(LOG_TAG, "Setting " + TERMUX_APP.FILE_SHARE_RECEIVER_ACTIVITY_CLASS_NAME + " component state to " + state);
-                errmsg = PackageUtils.setComponentState(context,TermuxConstants.TERMUX_PACKAGE_NAME,
-                    TERMUX_APP.FILE_SHARE_RECEIVER_ACTIVITY_CLASS_NAME,
-                    state, null, false, false);
-                if (errmsg != null)
-                    Logger.logError(LOG_TAG, errmsg);
+            state = !properties.isFileShareReceiverDisabled();
+            Logger.logVerbose(LOG_TAG, "Setting " + TERMUX_APP.FILE_SHARE_RECEIVER_ACTIVITY_CLASS_NAME + " component state to " + state);
+            errmsg = PackageUtils.setComponentState(context, TermuxConstants.TERMUX_PACKAGE_NAME,
+                TERMUX_APP.FILE_SHARE_RECEIVER_ACTIVITY_CLASS_NAME,
+                state, null, false, false);
+            if (errmsg != null)
+                Logger.logError(LOG_TAG, errmsg);
 
-                state = !properties.isFileViewReceiverDisabled();
-                Logger.logVerbose(LOG_TAG, "Setting " + TERMUX_APP.FILE_VIEW_RECEIVER_ACTIVITY_CLASS_NAME + " component state to " + state);
-                errmsg = PackageUtils.setComponentState(context,TermuxConstants.TERMUX_PACKAGE_NAME,
-                    TERMUX_APP.FILE_VIEW_RECEIVER_ACTIVITY_CLASS_NAME,
-                    state, null, false, false);
-                if (errmsg != null)
-                    Logger.logError(LOG_TAG, errmsg);
-
-            }
-        }.start();
+            state = !properties.isFileViewReceiverDisabled();
+            Logger.logVerbose(LOG_TAG, "Setting " + TERMUX_APP.FILE_VIEW_RECEIVER_ACTIVITY_CLASS_NAME + " component state to " + state);
+            errmsg = PackageUtils.setComponentState(context, TermuxConstants.TERMUX_PACKAGE_NAME,
+                TERMUX_APP.FILE_VIEW_RECEIVER_ACTIVITY_CLASS_NAME,
+                state, null, false, false);
+            if (errmsg != null)
+                Logger.logError(LOG_TAG, errmsg);
+        });
+        // Shut down the executor after the task is submitted.
+        executor.shutdown();
     }
 
 }
