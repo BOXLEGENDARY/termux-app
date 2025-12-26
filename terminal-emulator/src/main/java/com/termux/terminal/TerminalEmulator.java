@@ -371,7 +371,16 @@ public final class TerminalEmulator {
         if (mouseButton == MOUSE_LEFT_BUTTON_MOVED && !isDecsetInternalBitSet(DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT)) {
             // Do not send tracking.
         } else if (isDecsetInternalBitSet(DECSET_BIT_MOUSE_PROTOCOL_SGR)) {
-            mSession.write(String.format("\033[<%d;%d;%d" + (pressed ? 'M' : 'm'), mouseButton, column, row));
+            // Use StringBuilder instead of String.format to reduce GC pressure during rapid mouse movement.
+            StringBuilder sb = new StringBuilder();
+            sb.append("\033[<");
+            sb.append(mouseButton);
+            sb.append(';');
+            sb.append(column);
+            sb.append(';');
+            sb.append(row);
+            sb.append(pressed ? 'M' : 'm');
+            mSession.write(sb.toString());
         } else {
             mouseButton = pressed ? mouseButton : 3; // 3 for release of all buttons.
             // Clip to screen, and clip to the limits of 8-bit data.
@@ -527,10 +536,10 @@ public final class TerminalEmulator {
                         // "It is not possible to use a C1 control obtained from decoding the
                         // UTF-8 text" - http://invisible-island.net/xterm/ctlseqs/ctlseqs.html
                     } else {
-                        switch (Character.getType(codePoint)) {
-                            case Character.UNASSIGNED:
-                            case Character.SURROGATE:
-                                codePoint = UNICODE_REPLACEMENT_CHAR;
+                        // Surrogates are in the range D800-DFFF.
+                        if ((codePoint >= Character.MIN_SURROGATE && codePoint <= Character.MAX_SURROGATE) ||
+                            Character.getType(codePoint) == Character.UNASSIGNED) {
+                            codePoint = UNICODE_REPLACEMENT_CHAR;
                         }
                         processCodePoint(codePoint);
                     }
@@ -1151,7 +1160,7 @@ public final class TerminalEmulator {
                 switch (getArg0(-1)) {
                     case 6:
                         // Extended Cursor Position (DECXCPR - http://www.vt100.net/docs/vt510-rm/DECXCPR). Page=1.
-                        mSession.write(String.format(Locale.US, "\033[?%d;%d;1R", mCursorRow + 1, mCursorCol + 1));
+                        mSession.write("\033[?" + (mCursorRow + 1) + ";" + (mCursorCol + 1) + ";1R");
                         break;
                     default:
                         finishSequence();
@@ -1761,7 +1770,7 @@ public final class TerminalEmulator {
                     case 6: // Cursor position report (CPR):
                         // Answer is ESC [ y ; x R, where x,y is
                         // the cursor location.
-                        mSession.write(String.format(Locale.US, "\033[%d;%dR", mCursorRow + 1, mCursorCol + 1));
+                        mSession.write("\033[" + (mCursorRow + 1) + ";" + (mCursorCol + 1) + "R");
                         break;
                     default:
                         break;
@@ -1804,17 +1813,17 @@ public final class TerminalEmulator {
                         mSession.write("\033[3;0;0t");
                         break;
                     case 14: // Report xterm window in pixels. Result is CSI 4 ; height ; width t
-                        mSession.write(String.format(Locale.US, "\033[4;%d;%dt", mRows * mCellHeightPixels, mColumns * mCellWidthPixels));
+                        mSession.write("\033[4;" + (mRows * mCellHeightPixels) + ";" + (mColumns * mCellWidthPixels) + "t");
                         break;
                     case 16: // Report xterm character cell size in pixels. Result is CSI 6 ; height ; width t
-                        mSession.write(String.format(Locale.US, "\033[6;%d;%dt", mCellHeightPixels, mCellWidthPixels));
+                        mSession.write("\033[6;" + mCellHeightPixels + ";" + mCellWidthPixels + "t");
                         break;
                     case 18: // Report the size of the text area in characters. Result is CSI 8 ; height ; width t
-                        mSession.write(String.format(Locale.US, "\033[8;%d;%dt", mRows, mColumns));
+                        mSession.write("\033[8;" + mRows + ";" + mColumns + "t");
                         break;
                     case 19: // Report the size of the screen in characters. Result is CSI 9 ; height ; width t
                         // We report the same size as the view, since it's the view really isn't resizable from the shell.
-                        mSession.write(String.format(Locale.US, "\033[9;%d;%dt", mRows, mColumns));
+                        mSession.write("\033[9;" + mRows + ";" + mColumns + "t");
                         break;
                     case 20: // Report xterm windows icon label. Result is OSC L label ST. Disabled due to security concerns:
                         mSession.write("\033]LIconLabel\033\\");
@@ -2114,10 +2123,7 @@ public final class TerminalEmulator {
                 }
                 break;
             case 104:
-                // "104;$c" → Reset Color Number $c. It is reset to the color specified by the corresponding X
-                // resource. Any number of c parameters may be given. These parameters correspond to the ANSI colors 0-7,
-                // their bright versions 8-15, and if supported, the remainder of the 88-color or 256-color table. If no
-                // parameters are given, the entire table will be reset.
+                // "104;$c" -> Reset Color Number $c.
                 if (textParameter.isEmpty()) {
                     mColors.reset();
                     mSession.onColorsChanged();
@@ -2126,16 +2132,29 @@ public final class TerminalEmulator {
                     for (int charIndex = 0; ; charIndex++) {
                         boolean endOfInput = charIndex == textParameter.length();
                         if (endOfInput || textParameter.charAt(charIndex) == ';') {
-                            try {
-                                int colorToReset = Integer.parseInt(textParameter.substring(lastIndex, charIndex));
+                            int colorToReset = 0;
+                            boolean valid = true;
+                            if (lastIndex < charIndex) {
+                                for (int k = lastIndex; k < charIndex; k++) {
+                                    char c = textParameter.charAt(k);
+                                    if (c >= '0' && c <= '9') {
+                                        colorToReset = (colorToReset * 10) + (c - '0');
+                                    } else {
+                                        valid = false;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                valid = false; 
+                            }
+
+                            if (valid) {
                                 mColors.reset(colorToReset);
                                 mSession.onColorsChanged();
-                                if (endOfInput) break;
-                                charIndex++;
-                                lastIndex = charIndex;
-                            } catch (NumberFormatException e) {
-                                // Ignore.
                             }
+                            
+                            if (endOfInput) break;
+                            lastIndex = charIndex + 1; // Skip the semicolon
                         }
                     }
                 }
