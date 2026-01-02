@@ -5,5 +5,3 @@ this project so random
 ## Version
 
 ![Release](https://img.shields.io/github/v/release/BOXLEGENDARY/termux-app?label=release&style=flat-square&color=green)
-
-![Pre-Release](https://img.shields.io/github/v/release/BOXLEGENDARY/termux-app?label=pre-release&include_prereleases&style=flat-square&filter=*beta*)
