@@ -8,7 +8,7 @@ this project so random
 
 ## Plugins
 
-- [Termux:API](https://github.com/termux/termux-api/releases/latest/download/termux-api.apk)
+- [Termux:API]([https://github.com/termux/termux-api/releases/latest/download/termux-api.apk](https://github.com/termux/termux-api/releases/download/v0.53.0/termux-api-app_v0.53.0+github.debug.apk))
 - [Termux:Boot](https://github.com/termux/termux-boot/releases/latest/download/termux-boot.apk)
 - [Termux:Float](https://github.com/termux/termux-float/releases/latest/download/termux-float.apk)
 - [Termux:Styling](https://github.com/termux/termux-styling/releases/latest/download/termux-styling.apk)
