@@ -32,7 +32,7 @@ string jstring_to_stdstr(JNIEnv *env, jstring jString) {
 }
 
 /* Get characters before first occurrence of the delim in a std:string. */
-string get_string_till_first_delim(string str, char delim) {
+string get_string_till_first_delim(const string& str, char delim) {
     if (!str.empty()) {
         stringstream cmdline_args(str);
         string tmp;
@@ -43,7 +43,7 @@ string get_string_till_first_delim(string str, char delim) {
 }
 
 /* Replace `\0` values with spaces in a std:string. */
-string replace_null_with_space(string str) {
+string replace_null_with_space(const string& str) {
     if (str.empty())
         return "";
 
@@ -82,7 +82,7 @@ string get_process_cmdline(const pid_t pid) {
     char buf[BUFSIZ];
     size_t len;
     char procfile[BUFSIZ];
-    sprintf(procfile, "/proc/%d/cmdline", pid);
+    snprintf(procfile, sizeof(procfile), "/proc/%d/cmdline", pid);
     FILE *fp = fopen(procfile, "rb");
     if (fp) {
         while ((len = fread(buf, 1, sizeof(buf), fp)) > 0) {
@@ -116,9 +116,10 @@ void log_warn(string message) {
 }
 
 /* Get "title: message" formatted string. */
-string get_title_and_message(JNIEnv *env, jstring title, string message) {
-    if (title)
-        message = jstring_to_stdstr(env, title) + ": " + message;
+string get_title_and_message(JNIEnv *env, jstring title, const string& message) {
+    if (title) {
+        return jstring_to_stdstr(env, title) + ": " + message;
+    }
     return message;
 }
 
